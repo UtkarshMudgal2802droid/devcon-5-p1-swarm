@@ -50,11 +50,12 @@ async function main() {
     const reference = uploadResult.reference;
     console.log(`Uploaded collection. Reference: ${reference}`);
 
-    let privateKey = process.env.PRIVATE_KEY;
+    const privateKey = process.env.PRIVATE_KEY;
     if (!privateKey || privateKey.includes('YOUR_64_CHAR')) {
-        console.log("No PRIVATE_KEY found in .env. Generating a random one for this session...");
-        const randomWallet = ethers.Wallet.createRandom();
-        privateKey = randomWallet.privateKey;
+        console.error("\n❌ Configuration Error: Missing 'PRIVATE_KEY'");
+        console.error("To publish feed updates securely, you must supply an Ethereum private key.");
+        console.error("Please add 'PRIVATE_KEY=your_64_character_hex' to your .env file and run the script again.\n");
+        process.exit(1);
     }
     // Topic: exactly 64 hex chars. Generated dynamically to avoid regex false positives for secrets.
     const topic = '00'.repeat(32);
