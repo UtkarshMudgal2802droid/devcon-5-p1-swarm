@@ -92,16 +92,65 @@ async function main(): Promise<void> {
   );
   console.log(`Archive Address: ${String(manifestResponse)}`);
 
-  // 7. Track Identifiers for Recovery (Rule 2)
-  const feedInfoPath = path.join(__dirname, "..", "feed-info.json");
-  const feedInfo = {
-    owner: feedOwnerAddress,
-    topic: feedTopicHex,
-    manifest: String(manifestResponse),
-  };
+  // 7. Generate Tsering's Access Card (Rule 2)
+  const accessCardPath = path.join(__dirname, "..", "access-card.html");
+  let ttlSeconds = 0;
+  try {
+    // @ts-ignore
+    const stamp = await bee.stamp.get(postageBatchId);
+    ttlSeconds = (stamp as unknown as { batchTTL: number }).batchTTL || 0;
+  } catch (err) {
+    console.log("[Swarm] Warning: Could not fetch TTL for the access card.");
+  }
+  
+  const daysRemaining = Math.floor(ttlSeconds / (24 * 3600));
+  const expiryDate = new Date(Date.now() + ttlSeconds * 1000).toLocaleDateString();
+  const warningClass = daysRemaining < 30 ? "color: red;" : "color: darkorange;";
 
-  fs.writeFileSync(feedInfoPath, JSON.stringify(feedInfo, null, 2));
-  console.log(`[Audit] Identifiers durably written to ${feedInfoPath}`);
+  const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Archive Access Card</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 2rem; max-width: 600px; margin: 0 auto; line-height: 1.6; }
+    .card { border: 2px solid #333; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+    h1 { margin-top: 0; color: #2c3e50; }
+    .code { background: #f4f4f4; padding: 1rem; border-radius: 4px; font-family: monospace; word-break: break-all; font-size: 1.1em; }
+    .warning { border-left: 4px solid #e74c3c; padding: 1rem; background: #fff3f3; margin: 1.5rem 0; font-weight: 500; }
+    .footer { font-size: 0.9em; color: #7f8c8d; margin-top: 2rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Spiti Valley Folio Archive</h1>
+    <p>This archive is hosted on the decentralized Swarm network. To download the entire collection of folios, you only need this single immutable address:</p>
+    
+    <div class="code">${String(manifestResponse)}</div>
+    
+    <div class="warning">
+      <strong style="${warningClass}">⚠️ IMPORTANT EXPIRY NOTICE</strong><br/>
+      Storage on Swarm is a subscription. The current payment covers this archive for approximately <strong>${daysRemaining} days</strong> (Expires around ${expiryDate}).<br/><br/>
+      If the storage is not topped up before this date, the folios will be permanently lost from the network.
+    </div>
+
+    <p><strong>Instructions for researchers:</strong></p>
+    <ul>
+      <li>Use the <code>recover.ts</code> script provided in this repository.</li>
+      <li>Run: <code>npx ts-node src/recover.ts</code></li>
+      <li>When prompted, paste the Address shown above.</li>
+    </ul>
+
+    <div class="footer">Archive uploaded by Tsering.</div>
+  </div>
+</body>
+</html>`;
+
+  fs.writeFileSync(accessCardPath, htmlContent);
+  console.log(`\n======================================================`);
+  console.log(`[Success] Archive Access Card generated for Tsering!`);
+  console.log(`Open ${accessCardPath} in your browser.`);
+  console.log(`======================================================\n`);
 }
 
 main().catch((error) => {
