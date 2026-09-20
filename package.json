@@ -1,0 +1,23 @@
+{
+  "name": "devcon-5-p1-swarm",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "publish": "ts-node src/publish.ts",
+    "recover": "ts-node src/recover.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ethersphere/bee-js": "13.1.0",
+    "@types/node": "^20.12.0",
+    "dotenv": "^18.0.1",
+    "ethers": "^6.17.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  }
+}
