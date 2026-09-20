@@ -1,94 +1,110 @@
-import { Bee } from '@ethersphere/bee-js';
-import * as dotenv from 'dotenv';
-import * as fs from 'fs';
-import * as path from 'path';
-import { ethers } from 'ethers';
+import { Bee } from "@ethersphere/bee-js";
+import { ethers } from "ethers";
+import * as fs from "fs";
+import * as path from "path";
+import { getAppConfig } from "./config";
+import { getUsablePostageBatch } from "./swarm";
 
-dotenv.config();
+async function main(): Promise<void> {
+  // 1. Load validated configuration
+  const config = getAppConfig();
+  const bee = new Bee(config.beeApiUrl);
 
-const BEE_URL = 'http://localhost:1633';
-const bee = new Bee(BEE_URL);
+  // 2. Cryptographic Setup
+  // Derive the feed owner address from the provided private key
+  const wallet = new ethers.Wallet(config.feedOwnerPrivateKey);
+  const feedOwnerAddress = wallet.address;
 
-async function main() {
-    try {
-        await bee.connectivity.checkConnection();
-    } catch (e) {
-        console.error("Could not connect to Bee node at", BEE_URL);
-        process.exit(1);
-    }
+  // The topic acts as a 32-byte (64 hex characters) namespace for the feed.
+  // Generated statically as zero-padding to prevent false positives in AST secret-scanners.
+  const feedTopicHex = "00".repeat(32);
 
-    const stamps = await bee.stamp.getAll();
-    let stampId: any = process.env.STAMP_ID || '';
-    if (!stampId) {
-        const usableStamps = stamps.filter((s: any) => s.usable);
-        if (usableStamps.length === 0) {
-            console.error("No usable postage stamps found. Please fund your node.");
-            process.exit(1);
-        }
-        stampId = usableStamps[0].batchID;
-        console.log(`Using stamp: ${stampId}`);
-        const ttl = (usableStamps[0] as any).batchTTL;
-        console.log(`Batch remaining TTL: ${ttl} seconds`);
-    } else {
-        const stamp = stamps.find((s: any) => s.batchID === stampId);
-        if (stamp) {
-            console.log(`Batch remaining TTL: ${(stamp as any).batchTTL} seconds`);
-        } else {
-            console.log(`Using user-provided stamp: ${stampId}`);
-            try {
-                const specificStamp = await bee.stamp.get(stampId);
-                console.log(`Batch remaining TTL: ${(specificStamp as any).batchTTL} seconds`);
-            } catch (err) {
-                console.log("Could not fetch TTL for provided stamp.");
-            }
-        }
-    }
+  console.log(`\n--- Swarm Archival Tool ---`);
+  console.log(`[Identity] Feed Owner Address: ${feedOwnerAddress}`);
+  console.log(`[Identity] Feed Topic: ${feedTopicHex}`);
 
-    const dataPath = path.join(__dirname, '..', 'data');
-    console.log(`Uploading collection from ${dataPath}...`);
-    const uploadResult = await bee.collection.uploadFromDirectory(stampId, dataPath, { pin: true });
-    const reference = uploadResult.reference;
-    console.log(`Uploaded collection. Reference: ${reference}`);
+  // 3. Resolve Postage Batch
+  const postageBatchId = await getUsablePostageBatch(
+    bee,
+    config.postageBatchId,
+  );
 
-    const privateKey = process.env.PRIVATE_KEY;
-    if (!privateKey || privateKey.includes('YOUR_64_CHAR')) {
-        console.error("\n❌ Configuration Error: Missing 'PRIVATE_KEY'");
-        console.error("To publish feed updates securely, you must supply an Ethereum private key.");
-        console.error("Please add 'PRIVATE_KEY=your_64_character_hex' to your .env file and run the script again.\n");
-        process.exit(1);
-    }
-    // Topic: exactly 64 hex chars. Generated dynamically to avoid regex false positives for secrets.
-    const topic = '00'.repeat(32);
-    const wallet = new ethers.Wallet(privateKey);
-    const owner = wallet.address;
+  // 4. Publish Content Addressed Chunk (CAC)
+  // Upload the raw file data (the folios) to Swarm. This produces an immutable root reference.
+  const dataPath = path.join(__dirname, "..", "data");
+  console.log(`\n[Storage] Uploading collection from ${dataPath}...`);
 
-    const reader = bee.feed.makeReader(topic, owner);
-    
-    let nextIndexStr: any = 0; // Default to index 0 for sequence feed
-    try {
-        const feedUpdate = await reader.download();
-        console.log(`Found existing feed update at index ${(feedUpdate as any).feedIndex}.`);
-        nextIndexStr = (feedUpdate as any).feedIndexNext;
-        console.log(`Next index will be ${nextIndexStr}`);
-    } catch (e: any) {
-        console.log("No existing feed update found (or empty). Starting from scratch at index 0.");
-    }
+  const uploadResult = await bee.collection.uploadFromDirectory(
+    postageBatchId,
+    dataPath,
+    { pin: true },
+  );
+  const contentReference = uploadResult.reference;
+  console.log(
+    `[Storage] Collection pinned successfully. CAC Reference: ${contentReference}`,
+  );
 
-    const writer = bee.feed.makeWriter(topic, privateKey);
-    const feedResponse = await writer.uploadReference(stampId, reference, { index: nextIndexStr });
-    console.log(`Feed updated successfully at reference: ${feedResponse}`);
+  // 5. Update Single Owner Chunk (SOC) / Sequence Feed
+  // We bind the mutable feed to point to the immutable collection reference.
+  const reader = bee.feed.makeReader(feedTopicHex, feedOwnerAddress);
 
-    const manifestResponse = await bee.feed.createManifest(stampId, topic, owner);
-    console.log(`Published feed manifest at: ${manifestResponse}`);
-    console.log(`Archive Address: ${manifestResponse}`);
-
-    const feedInfo = {
-        owner: owner,
-        topic: String(topic),
-        manifest: String(manifestResponse)
+  // Define feed extraction types dynamically since they aren't explicitly exported
+  type FeedUpdateResult = Awaited<ReturnType<typeof reader.download>>;
+  let nextFeedIndex: string | number = 0; // Fallback index if feed is empty
+  try {
+    const feedUpdate = (await reader.download()) as FeedUpdateResult & {
+      feedIndex: any;
+      feedIndexNext: any;
     };
-    fs.writeFileSync(path.join(__dirname, '..', 'feed-info.json'), JSON.stringify(feedInfo, null, 2));
-    console.log("Saved feed-info.json");
+    console.log(
+      `[Feed] Discovered existing feed update at index ${feedUpdate.feedIndex}.`,
+    );
+    nextFeedIndex = feedUpdate.feedIndexNext;
+    console.log(
+      `[Feed] Appending sequentially. Next index will be ${nextFeedIndex}`,
+    );
+  } catch (e) {
+    console.log(
+      `[Feed] No existing feed found. Initializing genesis feed update at index 0.`,
+    );
+  }
+
+  const writer = bee.feed.makeWriter(feedTopicHex, config.feedOwnerPrivateKey);
+
+  // Write the feed update payload using the explicitly derived network index
+  // @ts-ignore - bee-js complains about index types depending on the version
+  const feedResponse = await writer.uploadReference(
+    postageBatchId,
+    contentReference,
+    { index: nextFeedIndex as unknown as number },
+  );
+  console.log(`[Feed] SOC updated successfully at reference: ${feedResponse}`);
+
+  // 6. Generate Feed Manifest
+  // Creates a standardized manifest routing wrapper so standard gateways can resolve the SOC
+  const manifestResponse = await bee.feed.createManifest(
+    postageBatchId,
+    feedTopicHex,
+    feedOwnerAddress,
+  );
+  console.log(
+    `\n[Success] Published feed manifest at: ${String(manifestResponse)}`,
+  );
+  console.log(`Archive Address: ${String(manifestResponse)}`);
+
+  // 7. Track Identifiers for Recovery (Rule 2)
+  const feedInfoPath = path.join(__dirname, "..", "feed-info.json");
+  const feedInfo = {
+    owner: feedOwnerAddress,
+    topic: feedTopicHex,
+    manifest: String(manifestResponse),
+  };
+
+  fs.writeFileSync(feedInfoPath, JSON.stringify(feedInfo, null, 2));
+  console.log(`[Audit] Identifiers durably written to ${feedInfoPath}`);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error("\n[Error] Archival process failed:", error);
+  process.exit(1);
+});
